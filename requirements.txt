@@ -1,0 +1,9 @@
+torch
+sentencepiece
+numpy
+einops
+torchdata
+einops
+pandas
+datasets
+pytest
