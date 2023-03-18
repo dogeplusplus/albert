@@ -1,12 +1,13 @@
-import torch.nn as nn
-import numpy as np
-import sentencepiece as spm
 import torch
+import numpy as np
+import torch.nn as nn
+import sentencepiece as spm
 
 from einops import rearrange
-
 from torchdata.dataloader2 import DataLoader2
 from torchdata.datapipes.iter import IterableWrapper, Collator
+
+from model import ALBERT
 
 
 def mask_probability(n, N):
@@ -59,7 +60,7 @@ def token_ngram_masking(sample, percentage: 0.15, max_gram_length: 3):
         mask_type = np.random.choice(["mask", "random", "original"], p=[0.8, 0.1, 0.1])
 
         if mask_type == "mask":
-            mask = [mask_token] * gram_length
+            mask = [MASK_TOKEN] * gram_length
             sample[position: position+gram_length] = mask
             masked[position: position+gram_length] = 1
         elif mask_type == "random":
@@ -76,10 +77,10 @@ def token_ngram_masking(sample, percentage: 0.15, max_gram_length: 3):
 sp = spm.SentencePieceProcessor(model_file="pubmed.model")
 
 # special tokens are length 2
-cls_token = sp.encode("[CLS]")[1]
-sep_token = sp.encode("[SEP]")[1]
-mask_token = sp.encode("[MASK]")[1]
-pad_token = sp.encode("[PAD]")[1]
+CLS_TOKEN = sp.encode("[CLS]")[1]
+SEP_TOKEN = sp.encode("[SEP]")[1]
+MASK_TOKEN = sp.encode("[MASK]")[1]
+PAD_TOKEN = sp.encode("[PAD]")[1]
 
 def tokenize(sample):
     first_sentence = sample[0]
@@ -103,13 +104,13 @@ def masking(sample):
     swap = np.random.randint(0, 2)
     # add 2 for cls and sep for first segment, 1 for sep
     if swap:
-        original_sequence = [cls_token] + second_tokens + [sep_token] + first_tokens + [sep_token]
-        masked_sequence = [cls_token] + second_masked + [sep_token] + first_masked + [sep_token]
+        original_sequence = [CLS_TOKEN] + second_tokens + [SEP_TOKEN] + first_tokens + [SEP_TOKEN]
+        masked_sequence = [CLS_TOKEN] + second_masked + [SEP_TOKEN] + first_masked + [SEP_TOKEN]
         segment_mask = (len(second_masked) + 2) * [0] + (len(first_masked) + 1) * [1]
         mask_locations = np.concatenate([(0,), second_locs, (0,), first_locs])
     else:
-        original_sequence = [cls_token] + first_tokens + [sep_token] + second_tokens + [sep_token]
-        masked_sequence = [cls_token] + first_masked + [sep_token] + second_masked + [sep_token]
+        original_sequence = [CLS_TOKEN] + first_tokens + [SEP_TOKEN] + second_tokens + [SEP_TOKEN]
+        masked_sequence = [CLS_TOKEN] + first_masked + [SEP_TOKEN] + second_masked + [SEP_TOKEN]
         segment_mask = (len(first_masked) + 2) * [0] + (len(second_masked) + 1) * [1]
         mask_locations = np.concatenate([(0,), first_locs, (0,), second_locs])
     
@@ -128,9 +129,9 @@ def pad_longest(batch):
     pad = lambda x, v: np.pad(x, (0, longest_sequence - len(x)), constant_values=v)
     batch = {
         "order": np.stack(b["order"] for b in batch),
-        "original_sequence": np.stack([pad(b["original_sequence"], pad_token) for b in batch]),
-        "masked_sequence": np.stack([pad(b["masked_sequence"], pad_token) for b in batch]),
-        "segment_mask": np.stack([pad(b["segment_mask"], pad_token) for b in batch]),
+        "original_sequence": np.stack([pad(b["original_sequence"], PAD_TOKEN) for b in batch]),
+        "masked_sequence": np.stack([pad(b["masked_sequence"], PAD_TOKEN) for b in batch]),
+        "segment_mask": np.stack([pad(b["segment_mask"], PAD_TOKEN) for b in batch]),
         # Any pad tokens are not masked
         "mask_locations": np.stack([pad(b["mask_locations"], 0) for b in batch]),
     }
@@ -148,8 +149,6 @@ datapipe = datapipe.map(tokenize)
 datapipe = datapipe.map(masking)
 datapipe = datapipe.batch(8)
 datapipe = Collator(datapipe, collate_fn=pad_longest)
-
-from model import ALBERT
 
 vocab_size = 30000
 

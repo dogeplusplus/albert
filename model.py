@@ -220,31 +220,6 @@ class TransformerDecoder(nn.Module):
         return x
 
 
-# vocab_size = 10000
-# embed_size = 128
-# hidden_size = 768
-
-# reg_embed = nn.Embedding(vocab_size, hidden_size)
-# fact_embed = FactorizedEmbedding(vocab_size, embed_size, hidden_size)
-
-
-def test_encoder_block():
-    hidden_size = 512
-    heads = 12
-    attn = Residual(MHSA(hidden_size, num_heads=heads, batch_first=True))
-    ff = Residual(nn.Sequential(
-        nn.Linear(hidden_size, hidden_size),
-        nn.GELU(),
-        nn.Linear(hidden_size, hidden_size),
-    ))
-    block = EncoderBlock(attn, ff, hidden_size)
-
-    tokens = torch.randn((8, 78, 512))
-
-    out = block(tokens)
-    print(out.shape)
-
-
 class ALBERT(nn.Module):
     def __init__(
         self,
