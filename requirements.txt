@@ -7,3 +7,4 @@ einops
 pandas
 datasets
 pytest
+torchmetrics

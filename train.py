@@ -1,10 +1,14 @@
 import torch
 import numpy as np
+import pandas as pd
 import torch.nn as nn
+import torchmetrics
 import sentencepiece as spm
 
+from collections import defaultdict
+from tqdm import tqdm
 from einops import rearrange
-from torchdata.dataloader2 import DataLoader2
+from torchdata.dataloader2 import DataLoader2, MultiProcessingReadingService
 from torchdata.datapipes.iter import IterableWrapper, Collator
 
 from model import ALBERT
@@ -14,40 +18,7 @@ def mask_probability(n, N):
     return (1 / n) / sum(1 / i for i in range(1, N+1))
  
 
-def ngram_masking(sample, percentage: 0.15, max_gram_length: 3):
-    #TODO: Delete if masking on after tokenization makes more sense
-    assert 0 < percentage < 1
-
-    words = sample.split(" ")
-    masked = np.zeros(len(words))
-    vocab_size = sp.piece_size()
-
-    while sum(masked) < percentage * len(words):
-        span_lengths = list(range(1, max_gram_length+1))
-        probs = [mask_probability(n, max_gram_length) for n in span_lengths]
-        gram_length = np.random.choice(span_lengths, p=probs)
-        gram_length = min(len(words), gram_length)
-        position = np.random.randint(0, len(words) - gram_length + 1)
-        mask_type = np.random.choice(["mask", "random", "original"], p=[0.8, 0.1, 0.1])
-
-        if mask_type == "mask":
-            mask = ["[MASK]"] * gram_length
-            words[position: position+gram_length] = mask
-            masked[position: position+gram_length] = 1
-        elif mask_type == "random":
-            rand_tokens = np.random.randint(0, vocab_size, gram_length).tolist()
-            mask = sp.decode(rand_tokens).split(" ")
-            words[position: position+gram_length] = mask
-            masked[position: position+gram_length] = 1
-        else:
-            masked[position: position+gram_length] = 1
-
-    return words, masked
-
-
 def token_ngram_masking(sample, percentage: 0.15, max_gram_length: 3):
-    assert 0 < percentage < 1
-
     masked = np.zeros(len(sample))
     vocab_size = sp.piece_size()
 
@@ -91,6 +62,7 @@ def tokenize(sample):
         "second_tokens": sp.encode(second_sentence),
     }
 
+
 def masking(sample):
     percentage = 0.15
     max_gram_length = 3
@@ -128,7 +100,7 @@ def pad_longest(batch):
     longest_sequence = max([len(b["original_sequence"]) for b in batch])
     pad = lambda x, v: np.pad(x, (0, longest_sequence - len(x)), constant_values=v)
     batch = {
-        "order": np.stack(b["order"] for b in batch),
+        "order": np.stack([b["order"] for b in batch]),
         "original_sequence": np.stack([pad(b["original_sequence"], PAD_TOKEN) for b in batch]),
         "masked_sequence": np.stack([pad(b["masked_sequence"], PAD_TOKEN) for b in batch]),
         "segment_mask": np.stack([pad(b["segment_mask"], PAD_TOKEN) for b in batch]),
@@ -142,33 +114,117 @@ def pad_longest(batch):
     return batch
 
 
-datapipe = IterableWrapper(["pubmed.csv"])
-datapipe = datapipe.open_files(encoding="utf-8").parse_csv()
-datapipe = datapipe.shuffle().sharding_filter()
-datapipe = datapipe.map(tokenize)
-datapipe = datapipe.map(masking)
-datapipe = datapipe.batch(8)
-datapipe = Collator(datapipe, collate_fn=pad_longest)
+def main():
+    epochs = 1
+    batch_size = 16
+    accumulation_steps = 4
+    show_every = 10
+    max_seq_len = 512
+    lr = 1e-4
+    valid_size = 0.2
+    seed = 42
 
-vocab_size = 30000
+    def truncate(batch):
+        for k in ["original_sequence", "masked_sequence", "segment_mask", "mask_locations"]:
+            batch[k] = batch[k][:max_seq_len]
 
-net = ALBERT(
-    vocab_size=vocab_size,
-    hidden_size=1024,
-    embed_dim=128,
-    layers=24,
-    max_seq_len=512,
-    out_features=vocab_size,
-)
+        return batch
 
-dl = DataLoader2(datapipe)
-for sample in dl:
-    pred = net(sample["masked_sequence"], sample["original_sequence"])
+    total_length = len(pd.read_csv("pubmed.csv"))
 
-    # TODO: Figure out how to select to only the tokens that were masked for the loss calculation
+    datapipe = IterableWrapper(["pubmed.csv"])
+    datapipe = datapipe.open_files(encoding="utf-8").parse_csv()
 
-    loss = nn.CrossEntropyLoss()(
-        rearrange(pred, "b l v -> b v l"),
-        sample["original_sequence"],
+    train_ds, valid_ds = datapipe.random_split(
+        weights={"train": 1 - valid_size, "valid": valid_size},
+        seed=seed,
+        total_length=total_length,
     )
-    import pdb; pdb.set_trace()
+
+    def preprocess_dataset(ds):
+        ds = ds.shuffle().sharding_filter()
+        ds = ds.map(tokenize)
+        ds = ds.map(masking)
+        ds = ds.map(truncate)
+        ds = ds.batch(batch_size)
+        ds = Collator(ds, collate_fn=pad_longest)
+
+        mpi_service = MultiProcessingReadingService(num_workers=8, prefetch_factor=4)
+        dl = DataLoader2(ds, reading_service=mpi_service)
+
+        return dl
+
+    train_loader = preprocess_dataset(train_ds)
+    valid_loader = preprocess_dataset(valid_ds)
+
+    vocab_size = 30000
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    net = ALBERT(
+        vocab_size=vocab_size,
+        hidden_size=1024,
+        embed_dim=128,
+        layers=24,
+        max_seq_len=512,
+    )
+    net.to(device)
+
+    optimizer = torch.optim.AdamW(net.parameters(), lr=lr)
+
+    step = 0
+    for epoch in range(epochs):
+        train_bar = tqdm(train_loader, desc=f"Train Epoch {epoch:03}")
+
+        metrics = defaultdict(lambda: torchmetrics.MeanMetric())
+
+        net.train()
+        for batch in train_bar:
+            batch = {
+                k: v.to(device) for k, v in batch.items()
+            }
+            pred = net(batch["masked_sequence"])
+            pred = rearrange(pred, "b l v -> b v l")
+            # Set ignore value to non-masked tokens when calculating cross entropy
+            label_masked = torch.where(batch["mask_locations"] == 0, -100, batch["original_sequence"])
+
+            loss = nn.CrossEntropyLoss()(
+                pred,
+                label_masked,
+            )
+            loss.backward()
+
+            if step % accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
+
+            if step % show_every == 0:
+                metrics["train_loss"].update(loss.item())
+                train_bar.set_postfix({k: float(v.compute()) for k, v in metrics.items()})
+
+            step += 1
+
+        net.eval()
+        valid_bar = tqdm(valid_loader, desc=f"Valid Epoch {epoch:03}")
+        for batch in valid_bar:
+            with torch.no_grad():
+                batch = {
+                    k: v.to(device) for k, v in batch.items()
+                }
+                pred = net(batch["masked_sequence"])
+                pred = rearrange(pred, "b l v -> b v l")
+                # Set ignore value to non-masked tokens when calculating cross entropy
+                label_masked = torch.where(batch["mask_locations"] == 0, -100, batch["original_sequence"])
+
+                loss = nn.CrossEntropyLoss()(
+                    pred,
+                    label_masked,
+                )
+
+            if step % show_every == 0:
+                metrics["valid_loss"].update(loss.item())
+                valid_bar.set_postfix({k: float(v.compute()) for k, v in metrics.items()})
+
+            step += 1
+
+if __name__ == "__main__":
+    main()

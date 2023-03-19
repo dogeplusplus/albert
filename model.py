@@ -43,9 +43,10 @@ class FactorizedEmbedding(nn.Module):
                 self.embed_hidden[self.padding_idx].fill_(0)
 
     def forward(self, x):
+        weight = self.embed_vocab @ self.embed_hidden
         x = F.embedding(
             x,
-            self.embed_vocab @ self.embed_hidden,
+            weight,
             self.padding_idx,
             self.max_norm,
             self.norm_type,
@@ -155,7 +156,7 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x, y):
         _, l, _ = x.shape
-        attn_mask = torch.tril(torch.ones((l, l)))
+        attn_mask = torch.tril(torch.ones((l, l))).to(x.device)
         x = self.masked_attn(x, attn_mask=attn_mask)
         x = self.ln(x)
         # Add input from encoder for MHA
@@ -228,7 +229,6 @@ class ALBERT(nn.Module):
         embed_dim,
         layers,
         max_seq_len,
-        out_features,
         attn_sharing = True,
         ff_sharing = True,
     ):
@@ -242,20 +242,28 @@ class ALBERT(nn.Module):
             attn_sharing,
             ff_sharing,
         )
-        self.decoder = TransformerDecoder(
-            vocab_size,
-            hidden_size,
-            embed_dim,
-            layers,
-            max_seq_len,
-            attn_sharing,
-            ff_sharing,
+
+        # TODO: check if the decoder for BERT/ALBERT is not the transformer in vaswani et al.
+        # self.decoder = TransformerDecoder(
+        #     vocab_size,
+        #     hidden_size,
+        #     embed_dim,
+        #     layers,
+        #     max_seq_len,
+        #     attn_sharing,
+        #     ff_sharing,
+        # )
+        # self.linear = nn.Linear(hidden_size, vocab_size)
+
+        self.decoder = nn.Sequential(
+            nn.LayerNorm((hidden_size,), eps=1e-12, elementwise_affine=True),
+            nn.Linear(hidden_size, embed_dim),
+            nn.Linear(embed_dim, vocab_size),
+            nn.GELU(),
         )
 
-        self.linear = nn.Linear(hidden_size, out_features)
 
-    def forward(self, x, y):
+    def forward(self, x):
         enc_out = self.encoder(x)
-        dec_out = self.decoder(enc_out, y)
-        dec_out = self.linear(dec_out)
+        dec_out = self.decoder(enc_out)
         return dec_out
