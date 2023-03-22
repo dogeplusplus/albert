@@ -2,20 +2,22 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from einops import repeat
 from copy import deepcopy
+
 
 class FactorizedEmbedding(nn.Module):
     def __init__(
-            self,
-            vocab_size,
-            embedding_size,
-            hidden_size,
-            padding_idx=None,
-            max_norm=None,
-            norm_type=2.,
-            scale_grad_by_freq=False,
-            sparse=False,
-        ):
+        self,
+        vocab_size,
+        embedding_size,
+        hidden_size,
+        padding_idx=None,
+        max_norm=None,
+        norm_type=2.,
+        scale_grad_by_freq=False,
+        sparse=False,
+    ):
         super().__init__()
         self.vocab_size = vocab_size
         self.embedding_size = embedding_size
@@ -25,7 +27,6 @@ class FactorizedEmbedding(nn.Module):
         self.norm_type = norm_type
         self.scale_grad_by_freq = scale_grad_by_freq
         self.sparse = sparse
-
 
         self.embed_vocab = nn.Parameter(torch.empty(vocab_size, embedding_size))
         self.embed_hidden = nn.Parameter(torch.empty(embedding_size, hidden_size))
@@ -82,7 +83,8 @@ class EncoderBlock(nn.Module):
         x = self.ff(x)
         x = self.ln2(x)
         return x
-    
+
+
 class MHSA(nn.Module):
     def __init__(self, *args, **kwargs):
         super().__init__()
@@ -101,9 +103,9 @@ class TransformerEncoder(nn.Module):
             embed_dim,
             layers,
             max_seq_len,
-            attn_sharing = True,
-            ff_sharing = True,
-            ):
+            attn_sharing=True,
+            ff_sharing=True,
+    ):
         super().__init__()
         self.vocab_size = vocab_size
         self.layers = layers
@@ -126,19 +128,26 @@ class TransformerEncoder(nn.Module):
                 attn = deepcopy(attn)
             if not ff_sharing:
                 ff = deepcopy(ff)
-            
+
             self.blocks.append(EncoderBlock(attn, ff, self.hidden_size))
 
         self.embed = FactorizedEmbedding(self.vocab_size, self.embed_dim, self.hidden_size)
-        self.pos_encoding = nn.Parameter(torch.randn((self.max_seq_len, self.hidden_size)))
+
+        self.pos_tokens = torch.arange(0, max_seq_len)
+        self.pos_embed = nn.Embedding(max_seq_len, hidden_size)
 
     def forward(self, x):
-        l = x.shape[1]
+        b, l = x.shape[:2]
+
+        pos_tokens = repeat(self.pos_tokens, "... -> b ...", b=b)
+        pos_embedding = self.pos_embed(pos_tokens)[:, :l]
+
         x = self.embed(x)
-        x = x + self.pos_encoding[:l]
+        x = x + pos_embedding
         x = self.blocks(x)
 
         return x
+
 
 class DecoderBlock(nn.Module):
     def __init__(self, masked_attn, attn, ff, hidden_size):
@@ -152,7 +161,6 @@ class DecoderBlock(nn.Module):
         self.ln = nn.LayerNorm(self.hidden_size)
         self.ln2 = nn.LayerNorm(self.hidden_size)
         self.ln3 = nn.LayerNorm(self.hidden_size)
-
 
     def forward(self, x, y):
         _, l, _ = x.shape
@@ -176,8 +184,8 @@ class TransformerDecoder(nn.Module):
         embed_dim,
         layers,
         max_seq_len,
-        attn_sharing = True,
-        ff_sharing = True,
+        attn_sharing=True,
+        ff_sharing=True,
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -203,10 +211,9 @@ class TransformerDecoder(nn.Module):
                 masked_attn = deepcopy(masked_attn)
             if not ff_sharing:
                 ff = deepcopy(ff)
-            
+
             self.blocks.append(DecoderBlock(masked_attn, attn, ff, self.hidden_size))
 
-    
         self.embed = FactorizedEmbedding(self.vocab_size, self.embed_dim, self.hidden_size)
         self.pos_encoding = nn.Parameter(torch.randn((self.max_seq_len, self.hidden_size)))
 
@@ -229,8 +236,8 @@ class ALBERT(nn.Module):
         embed_dim,
         layers,
         max_seq_len,
-        attn_sharing = True,
-        ff_sharing = True,
+        attn_sharing=True,
+        ff_sharing=True,
     ):
         super().__init__()
         self.encoder = TransformerEncoder(
@@ -243,25 +250,15 @@ class ALBERT(nn.Module):
             ff_sharing,
         )
 
-        # TODO: check if the decoder for BERT/ALBERT is not the transformer in vaswani et al.
-        # self.decoder = TransformerDecoder(
-        #     vocab_size,
-        #     hidden_size,
-        #     embed_dim,
-        #     layers,
-        #     max_seq_len,
-        #     attn_sharing,
-        #     ff_sharing,
-        # )
-        # self.linear = nn.Linear(hidden_size, vocab_size)
-
         self.decoder = nn.Sequential(
             nn.LayerNorm((hidden_size,), eps=1e-12, elementwise_affine=True),
             nn.Linear(hidden_size, embed_dim),
+            nn.GELU(),
             nn.Linear(embed_dim, vocab_size),
             nn.GELU(),
         )
 
+        self.device_indicator = nn.Parameter(torch.empty(0))
 
     def forward(self, x):
         enc_out = self.encoder(x)

@@ -6,6 +6,7 @@ import torch.nn.functional as F
 import torchmetrics
 import sentencepiece as spm
 
+from accelerate import infer_auto_device_map, dispatch_model
 from safetensors.torch import save_file
 from collections import defaultdict
 from tqdm import tqdm
@@ -45,9 +46,6 @@ def token_ngram_masking(sample, percentage: 0.15, max_gram_length: 3):
             rand_tokens = np.random.randint(
                 0, vocab_size, gram_length).tolist()
             sample[position: position+gram_length] = rand_tokens
-            masked[position: position+gram_length] = 1
-        # TODO: check if the original token should appear in the masked loss calculation
-        else:
             masked[position: position+gram_length] = 1
 
     return sample, masked
@@ -180,7 +178,6 @@ def main():
 
     vocab_size = 30000
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
     net = ALBERT(
         vocab_size=vocab_size,
         hidden_size=1024,
@@ -188,7 +185,11 @@ def main():
         layers=24,
         max_seq_len=512,
     )
-    net.to(device)
+
+    device_map = infer_auto_device_map(net)
+    net = dispatch_model(net, device_map)
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     optimizer = torch.optim.AdamW(net.parameters(), lr=lr)
 
