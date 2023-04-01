@@ -6,6 +6,12 @@ import torch.nn.functional as F
 import torchmetrics
 import sentencepiece as spm
 
+
+from itertools import chain
+from transformers import AutoTokenizer
+from datasets import load_dataset
+from transformers.data.data_collator import DataCollatorForLanguageModeling
+from torch.utils.data import DataLoader
 from accelerate import infer_auto_device_map, dispatch_model
 from safetensors.torch import save_file
 from collections import defaultdict
@@ -131,22 +137,72 @@ def pad_longest(batch):
     return batch
 
 
-def main():
-    epochs = 1
-    batch_size = 8
-    accumulation_steps = 4
-    show_every = 10
-    max_seq_len = 512
-    lr = 1e-4
-    valid_size = 0.2
-    seed = 42
+def huggingface_datapipeline(max_seq_len, batch_size, valid_size):
+    tokenizer = AutoTokenizer.from_pretrained("albert-base-v2")
 
-    def truncate(batch):
-        for k in ["original_sequence", "masked_sequence", "segment_mask", "mask_locations"]:
-            batch[k] = batch[k][:max_seq_len]
+    def group_texts(examples):
+        # Concatenate all texts.
+        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
+        # customize this part to your needs.
+        if total_length >= max_seq_len:
+            total_length = (total_length // max_seq_len) * max_seq_len
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i: i + max_seq_len] for i in range(0, total_length, max_seq_len)]
+            for k, t in concatenated_examples.items()
+        }
+        return result
 
-        return batch
+    ds = load_dataset("wikitext", name="wikitext-103-raw-v1")
 
+    column_names = list(ds["train"].features)
+    text_column_name = "text" if "text" in column_names else column_names[0]
+
+    def tokenize_function(examples):
+        return tokenizer(examples[text_column_name], return_special_tokens_mask=True)
+
+    def swap_segments(sample):
+        num_samples = len(sample["input_ids"])
+        swap = np.random.binomial(1, 0.5, num_samples).astype(float).tolist()
+
+        for i in range(num_samples):
+            mid = len(sample["input_ids"][i]) // 2
+            for k, v in sample.items():
+                if swap[i]:
+                    sample[k][i] = v[i][mid:] + v[i][:mid]
+
+        sample["swap"] = swap
+        return sample
+
+    tokenized_datasets = ds.map(
+        tokenize_function,
+        batched=True,
+        remove_columns=column_names,
+    )
+    tokenized_datasets = tokenized_datasets.map(
+        group_texts,
+        batched=True,
+    )
+    tokenized_datasets = tokenized_datasets.map(
+        swap_segments,
+        batched=True,
+    )
+
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm_probability=0.15,
+        pad_to_multiple_of=8,
+    )
+
+    train_loader = DataLoader(tokenized_datasets["train"], batch_size=batch_size, collate_fn=data_collator)
+    valid_loader = DataLoader(tokenized_datasets["test"], batch_size=batch_size, collate_fn=data_collator)
+
+    return train_loader, valid_loader
+
+
+def custom_data_pipeline(valid_size, seed, max_seq_len, batch_size):
     total_length = len(pd.read_csv("pubmed.csv"))
     logger.info(f"Total Length: {total_length}")
 
@@ -158,6 +214,12 @@ def main():
         seed=seed,
         total_length=total_length,
     )
+
+    def truncate(batch):
+        for k in ["original_sequence", "masked_sequence", "segment_mask", "mask_locations"]:
+            batch[k] = batch[k][:max_seq_len]
+
+        return batch
 
     def preprocess_dataset(ds):
         ds = ds.shuffle().sharding_filter()
@@ -176,8 +238,20 @@ def main():
     train_loader = preprocess_dataset(train_ds)
     valid_loader = preprocess_dataset(valid_ds)
 
-    vocab_size = 30000
+    return train_loader, valid_loader
 
+
+def main():
+    epochs = 1
+    batch_size = 8
+    accumulation_steps = 4
+    show_every = 10
+    max_seq_len = 512
+    lr = 1e-4
+    valid_size = 0.2
+
+    train_loader, valid_loader = huggingface_datapipeline(max_seq_len, batch_size, valid_size)
+    vocab_size = 30000
     net = ALBERT(
         vocab_size=vocab_size,
         hidden_size=1024,
@@ -188,9 +262,7 @@ def main():
 
     device_map = infer_auto_device_map(net)
     net = dispatch_model(net, device_map)
-
     device = "cuda" if torch.cuda.is_available() else "cpu"
-
     optimizer = torch.optim.AdamW(net.parameters(), lr=lr)
 
     step = 0
@@ -204,18 +276,17 @@ def main():
             batch = {
                 k: v.to(device) for k, v in batch.items()
             }
-            pred = net(batch["masked_sequence"])
+            pred = net(batch["input_ids"])
             pred = rearrange(pred, "b l v -> b v l")
             # Set ignore value to non-masked tokens when calculating cross entropy
-            label_masked = torch.where(
-                batch["mask_locations"] == 0, -100, batch["original_sequence"])
+            labels_masked = batch["labels"]
 
             mlm_loss = F.cross_entropy(
                 pred,
-                label_masked,
+                labels_masked,
             )
             sop_loss = F.binary_cross_entropy(
-                F.sigmoid(pred[:, 0, 0]), batch["order"])
+                F.sigmoid(pred[:, 0, 0]), batch["swap"])
 
             total_loss = sop_loss + mlm_loss
             total_loss.backward()
@@ -253,7 +324,7 @@ def main():
                 )
 
                 sop_loss = F.binary_cross_entropy(
-                    F.sigmoid(pred[:, 0, 0]), batch["order"])
+                    F.sigmoid(pred[:, 0, 0]), batch["swap"])
                 total_loss = mlm_loss + sop_loss
 
             metrics["valid_total_loss"].update(total_loss.item())
