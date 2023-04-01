@@ -133,7 +133,8 @@ class TransformerEncoder(nn.Module):
 
         self.embed = FactorizedEmbedding(self.vocab_size, self.embed_dim, self.hidden_size)
 
-        self.pos_tokens = torch.arange(0, max_seq_len)
+        pos_tokens = torch.arange(0, max_seq_len)
+        self.register_buffer("pos_tokens", pos_tokens)
         self.pos_embed = nn.Embedding(max_seq_len, hidden_size)
 
     def forward(self, x):
