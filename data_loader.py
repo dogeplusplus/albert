@@ -1,3 +1,4 @@
+import os
 import torch
 import logging
 import numpy as np
@@ -154,6 +155,7 @@ def huggingface_datapipeline(max_seq_len, batch_size, valid_size):
         return tokenizer(examples[text_column_name], return_special_tokens_mask=True)
 
     def swap_segments(sample):
+        # TODO: Think about how the SOP loss will be calculated, do we need to insert a token at start?
         num_samples = len(sample["input_ids"])
         swap = np.random.binomial(1, 0.5, num_samples).astype(float).tolist()
 
@@ -186,8 +188,19 @@ def huggingface_datapipeline(max_seq_len, batch_size, valid_size):
         pad_to_multiple_of=8,
     )
 
-    train_loader = DataLoader(tokenized_datasets["train"], batch_size=batch_size, collate_fn=data_collator)
-    valid_loader = DataLoader(tokenized_datasets["test"], batch_size=batch_size, collate_fn=data_collator)
+    workers = os.cpu_count() // 2
+    train_loader = DataLoader(
+        tokenized_datasets["train"],
+        batch_size=batch_size,
+        collate_fn=data_collator,
+        num_workers=workers,
+    )
+    valid_loader = DataLoader(
+        tokenized_datasets["test"],
+        batch_size=batch_size,
+        collate_fn=data_collator,
+        num_workers=workers,
+    )
 
     return train_loader, valid_loader
 
