@@ -28,16 +28,12 @@ class LanguageModelingTrainer(pl.LightningModule):
         )
 
     def training_step(self, batch, batch_idx):
-        pred = self.model(batch["input_ids"])
+        pred, sentence_order = self.model(batch["input_ids"])
         pred = rearrange(pred, "b l v -> b v l")
         labels_masked = batch["labels"]
 
-        mlm_loss = F.cross_entropy(
-            pred,
-            labels_masked,
-        )
-        sop_loss = F.binary_cross_entropy(
-            F.sigmoid(pred[:, 0, 0]), batch["swap"])
+        mlm_loss = F.cross_entropy(pred, labels_masked)
+        sop_loss = F.binary_cross_entropy(sentence_order, batch["swap"])
         total_loss = sop_loss + mlm_loss
 
         self.log("train_total_loss", total_loss.item())
@@ -47,17 +43,12 @@ class LanguageModelingTrainer(pl.LightningModule):
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        pred = self.model(batch["input_ids"])
+        pred, sentence_order = self.model(batch["input_ids"])
         pred = rearrange(pred, "b l v -> b v l")
         labels_masked = batch["labels"]
 
-        mlm_loss = F.cross_entropy(
-            pred,
-            labels_masked,
-        )
-
-        sop_loss = F.binary_cross_entropy(
-            F.sigmoid(pred[:, 0, 0]), batch["swap"])
+        mlm_loss = F.cross_entropy(pred, labels_masked)
+        sop_loss = F.binary_cross_entropy(sentence_order, batch["swap"])
         total_loss = mlm_loss + sop_loss
 
         self.log("valid_total_loss", total_loss.item())

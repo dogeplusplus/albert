@@ -259,9 +259,15 @@ class ALBERT(nn.Module):
             nn.GELU(),
         )
 
+        # Separate head for sentence order, not part of original implementation
+        self.sentence_order = nn.Linear(vocab_size, 1)
         self.device_indicator = nn.Parameter(torch.empty(0))
 
     def forward(self, x):
         enc_out = self.encoder(x)
         dec_out = self.decoder(enc_out)
-        return dec_out
+
+        sentence_order = self.sentence_order(dec_out)
+        sentence_order = F.sigmoid(torch.mean(sentence_order, dim=(1, 2)))
+
+        return dec_out, sentence_order

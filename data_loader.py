@@ -155,7 +155,6 @@ def huggingface_datapipeline(max_seq_len, batch_size, valid_size):
         return tokenizer(examples[text_column_name], return_special_tokens_mask=True)
 
     def swap_segments(sample):
-        # TODO: Think about how the SOP loss will be calculated, do we need to insert a token at start?
         num_samples = len(sample["input_ids"])
         swap = np.random.binomial(1, 0.5, num_samples).astype(float).tolist()
 
