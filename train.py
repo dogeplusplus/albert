@@ -1,11 +1,13 @@
 import torch
 import logging
-import pytorch_lightning as pl
+import lightning.pytorch as pl
 import torch.nn.functional as F
 
 from model import ALBERT
 from einops import rearrange
 from data_loader import huggingface_datapipeline
+from lightning.pytorch.callbacks import RichProgressBar, RichModelSummary
+from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 
 
 logger = logging.getLogger(__name__)
@@ -36,9 +38,9 @@ class LanguageModelingTrainer(pl.LightningModule):
         sop_loss = F.binary_cross_entropy(sentence_order, batch["swap"])
         total_loss = sop_loss + mlm_loss
 
-        self.log("train_total_loss", total_loss.item())
-        self.log("train_mlm_loss", mlm_loss.item())
-        self.log("train_sop_loss", sop_loss.item())
+        self.log("train_total_loss", total_loss.item(), prog_bar=True)
+        self.log("train_mlm_loss", mlm_loss.item(), prog_bar=True)
+        self.log("train_sop_loss", sop_loss.item(), prog_bar=True)
 
         return total_loss
 
@@ -51,9 +53,9 @@ class LanguageModelingTrainer(pl.LightningModule):
         sop_loss = F.binary_cross_entropy(sentence_order, batch["swap"])
         total_loss = mlm_loss + sop_loss
 
-        self.log("valid_total_loss", total_loss.item())
-        self.log("valid_mlm_loss", mlm_loss.item())
-        self.log("valid_sop_loss", sop_loss.item())
+        self.log("valid_total_loss", total_loss.item(), prog_bar=True)
+        self.log("valid_mlm_loss", mlm_loss.item(), prog_bar=True)
+        self.log("valid_sop_loss", sop_loss.item(), prog_bar=True)
 
         return total_loss
 
@@ -76,12 +78,21 @@ def main():
 
     train_loader, valid_loader = huggingface_datapipeline(max_seq_len, batch_size, valid_size)
 
+    progress_bar = RichProgressBar(
+        theme=RichProgressBarTheme(
+            description="green_yellow",
+            progress_bar="green1",
+        )
+    )
+    model_summary = RichModelSummary()
+
     trainer = pl.Trainer(
         default_root_dir="models",
         accumulate_grad_batches=accumulation_steps,
         max_epochs=epochs,
         accelerator="gpu",
         devices=1,
+        callbacks=[progress_bar, model_summary],
     )
 
     vocab_size = vocab_size
