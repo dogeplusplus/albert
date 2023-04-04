@@ -132,14 +132,11 @@ class TransformerEncoder(nn.Module):
             self.blocks.append(EncoderBlock(attn, ff, self.hidden_size))
 
         self.embed = FactorizedEmbedding(self.vocab_size, self.embed_dim, self.hidden_size)
-
-        pos_tokens = torch.arange(0, max_seq_len)
-        self.register_buffer("pos_tokens", pos_tokens)
         self.pos_embed = nn.Embedding(max_seq_len, hidden_size)
+        self.register_buffer("pos_tokens", torch.arange(0, self.max_seq_len))
 
     def forward(self, x):
         b, l = x.shape[:2]
-
         pos_tokens = repeat(self.pos_tokens, "... -> b ...", b=b)
         pos_embedding = self.pos_embed(pos_tokens)[:, :l]
 
@@ -165,7 +162,7 @@ class DecoderBlock(nn.Module):
 
     def forward(self, x, y):
         _, l, _ = x.shape
-        attn_mask = torch.tril(torch.ones((l, l))).to(x.device)
+        attn_mask = torch.tril(torch.ones((l, l)))
         x = self.masked_attn(x, attn_mask=attn_mask)
         x = self.ln(x)
         # Add input from encoder for MHA
