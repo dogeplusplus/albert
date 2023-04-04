@@ -6,6 +6,7 @@ import torch.nn.functional as F
 from model import ALBERT
 from einops import rearrange
 from data_loader import huggingface_datapipeline
+from lightning.pytorch.loggers.wandb import WandbLogger
 from lightning.pytorch.callbacks import RichProgressBar, RichModelSummary
 from lightning.pytorch.callbacks.progress.rich_progress import RichProgressBarTheme
 
@@ -15,7 +16,17 @@ logging.basicConfig(level=logging.INFO)
 
 
 class LanguageModelingTrainer(pl.LightningModule):
-    def __init__(self, vocab_size, hidden_size, embed_dim, layers, max_seq_len, lr):
+    def __init__(
+        self,
+        vocab_size: int,
+        hidden_size: int,
+        embed_dim: int,
+        layers: int,
+        max_seq_len: int,
+        lr: float,
+        attn_sharing: bool = True,
+        ff_sharing: bool = True
+    ):
         super().__init__()
         self.save_hyperparameters()
         self.lr = lr
@@ -26,7 +37,8 @@ class LanguageModelingTrainer(pl.LightningModule):
             embed_dim,
             layers,
             max_seq_len,
-            lr,
+            attn_sharing,
+            ff_sharing,
         )
 
     def training_step(self, batch, batch_idx):
@@ -84,6 +96,8 @@ def main():
             progress_bar="green1",
         )
     )
+    wandb_log = WandbLogger(project="albert-transformer")
+
     model_summary = RichModelSummary()
 
     trainer = pl.Trainer(
@@ -93,6 +107,7 @@ def main():
         accelerator="gpu",
         devices=1,
         callbacks=[progress_bar, model_summary],
+        logger=wandb_log,
     )
 
     vocab_size = vocab_size
@@ -108,6 +123,8 @@ def main():
         layers,
         max_seq_len,
         lr,
+        ff_sharing=False,
+        attn_sharing=False,
     )
     trainer.fit(model, train_loader, valid_loader)
 
