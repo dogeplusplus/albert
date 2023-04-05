@@ -25,7 +25,8 @@ class LanguageModelingTrainer(pl.LightningModule):
         max_seq_len: int,
         lr: float,
         attn_sharing: bool = True,
-        ff_sharing: bool = True
+        ff_sharing: bool = True,
+        simple_decoder: bool = True,
     ):
         super().__init__()
         self.save_hyperparameters()
@@ -39,6 +40,7 @@ class LanguageModelingTrainer(pl.LightningModule):
             max_seq_len,
             attn_sharing,
             ff_sharing,
+            simple_decoder,
         )
 
     def training_step(self, batch, batch_idx):
@@ -81,12 +83,14 @@ class LanguageModelingTrainer(pl.LightningModule):
 
 def main():
     epochs = 3
-    batch_size = 16
+    batch_size = 2
     accumulation_steps = 4
     max_seq_len = 512
     lr = 1e-4
     valid_size = 0.2
     vocab_size = 30000
+
+    torch.set_float32_matmul_precision("medium")
 
     train_loader, valid_loader = huggingface_datapipeline(max_seq_len, batch_size, valid_size)
 

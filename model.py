@@ -148,7 +148,7 @@ class TransformerEncoder(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, masked_attn, attn, ff, hidden_size):
+    def __init__(self, masked_attn, attn, ff, hidden_size, max_seq_len):
         super().__init__()
         self.hidden_size = hidden_size
         self.masked_attn = masked_attn
@@ -160,13 +160,14 @@ class DecoderBlock(nn.Module):
         self.ln2 = nn.LayerNorm(self.hidden_size)
         self.ln3 = nn.LayerNorm(self.hidden_size)
 
-    def forward(self, x, y):
+        self.register_buffer("attn_mask", torch.tril(torch.ones(max_seq_len, max_seq_len)).to(torch.bool))
+
+    def forward(self, x):
         _, l, _ = x.shape
-        attn_mask = torch.tril(torch.ones((l, l)))
-        x = self.masked_attn(x, attn_mask=attn_mask)
+        x = self.masked_attn(x, attn_mask=self.attn_mask[:l, :l])
         x = self.ln(x)
         # Add input from encoder for MHA
-        x = self.attn(x + y)
+        x = self.attn(x)
         x = self.ln2(x)
         x = self.ff(x)
         x = self.ln3(x)
@@ -210,19 +211,25 @@ class TransformerDecoder(nn.Module):
             if not ff_sharing:
                 ff = deepcopy(ff)
 
-            self.blocks.append(DecoderBlock(masked_attn, attn, ff, self.hidden_size))
+            self.blocks.append(DecoderBlock(masked_attn, attn, ff, self.hidden_size, self.max_seq_len))
 
-        self.embed = FactorizedEmbedding(self.vocab_size, self.embed_dim, self.hidden_size)
         self.pos_encoding = nn.Parameter(torch.randn((self.max_seq_len, self.hidden_size)))
+        self.decode_head = nn.Sequential(
+            nn.LayerNorm((hidden_size,), eps=1e-12, elementwise_affine=True),
+            nn.Linear(self.hidden_size, self.embed_dim),
+            nn.GELU(),
+            nn.Linear(self.embed_dim, self.vocab_size),
+            nn.GELU()
+        )
 
-    def forward(self, encoder_state, out_seq):
-        l = out_seq.shape[1]
-        out_emb = self.embed(out_seq)
-        x = out_emb + self.pos_encoding[:l]
+    def forward(self, x):
+        l = x.shape[1]
+        x = x + self.pos_encoding[:l]
 
         for block in self.blocks:
-            x = block(x, encoder_state)
+            x = block(x)
 
+        x = self.decode_head(x)
         return x
 
 
@@ -236,6 +243,7 @@ class ALBERT(nn.Module):
         max_seq_len,
         attn_sharing=True,
         ff_sharing=True,
+        simple_decoder=False,
     ):
         super().__init__()
         self.encoder = TransformerEncoder(
@@ -248,13 +256,24 @@ class ALBERT(nn.Module):
             ff_sharing,
         )
 
-        self.decoder = nn.Sequential(
-            nn.LayerNorm((hidden_size,), eps=1e-12, elementwise_affine=True),
-            nn.Linear(hidden_size, embed_dim),
-            nn.GELU(),
-            nn.Linear(embed_dim, vocab_size),
-            nn.GELU(),
-        )
+        if simple_decoder:
+            self.decoder = nn.Sequential(
+                nn.LayerNorm((hidden_size,), eps=1e-12, elementwise_affine=True),
+                nn.Linear(hidden_size, embed_dim),
+                nn.GELU(),
+                nn.Linear(embed_dim, vocab_size),
+                nn.GELU(),
+            )
+        else:
+            self.decoder = TransformerDecoder(
+                vocab_size,
+                hidden_size,
+                embed_dim,
+                layers,
+                max_seq_len,
+                attn_sharing,
+                ff_sharing,
+            )
 
         # Separate head for sentence order, not part of original implementation
         self.sentence_order = nn.Linear(vocab_size, 1)
