@@ -1,0 +1,5 @@
+wandb/
+models/
+lightning_logs/
+*.csv
+*.txt

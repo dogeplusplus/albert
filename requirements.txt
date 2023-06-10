@@ -1,11 +1,12 @@
 datasets
 einops
-einops
 numpy
 pandas
 pytest
+pytorch_lightning
 safetensors
 sentencepiece
 torch
 torchdata
 torchmetrics
+wandb

@@ -4,6 +4,8 @@ import torch.nn.functional as F
 
 from einops import repeat
 from copy import deepcopy
+from transformers import AlbertConfig
+from transformers import AlbertForMaskedLM
 
 
 class FactorizedEmbedding(nn.Module):
@@ -160,7 +162,7 @@ class DecoderBlock(nn.Module):
         self.ln2 = nn.LayerNorm(self.hidden_size)
         self.ln3 = nn.LayerNorm(self.hidden_size)
 
-        self.register_buffer("attn_mask", torch.tril(torch.ones(max_seq_len, max_seq_len)).to(torch.bool))
+        self.register_buffer("attn_mask", torch.tril(torch.ones(max_seq_len, max_seq_len)))
 
     def forward(self, x):
         _, l, _ = x.shape
@@ -276,6 +278,7 @@ class ALBERT(nn.Module):
             )
 
         # Separate head for sentence order, not part of original implementation
+        self.norm = nn.LayerNorm(vocab_size)
         self.sentence_order = nn.Linear(vocab_size, 1)
         self.device_indicator = nn.Parameter(torch.empty(0))
 
@@ -283,7 +286,26 @@ class ALBERT(nn.Module):
         enc_out = self.encoder(x)
         dec_out = self.decoder(enc_out)
 
-        sentence_order = self.sentence_order(dec_out)
+        sentence_order = self.norm(dec_out)
+        sentence_order = self.sentence_order(sentence_order)
         sentence_order = F.sigmoid(torch.mean(sentence_order, dim=(1, 2)))
 
         return dec_out, sentence_order
+
+
+class HFALBERT(nn.Module):
+    def __init__(self, vocab_size, embed_dim, hidden_size, layers):
+        super().__init__()
+        config = AlbertConfig(vocab_size, embed_dim, hidden_size, layers)
+        self.mod = AlbertForMaskedLM(config)
+        self.norm = nn.LayerNorm(vocab_size)
+        self.sentence_order = nn.Linear(vocab_size, 1)
+
+    def forward(self, x):
+        logits = self.mod(x)["logits"]
+
+        sentence_order = self.norm(logits)
+        sentence_order = self.sentence_order(sentence_order)
+        sentence_order = F.sigmoid(torch.mean(sentence_order, dim=(1, 2)))
+
+        return logits, sentence_order
